@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>kabu-trader 今日の候補と見通し</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#ffffff; --ink:#1a1a18; --muted:#6b6a66; --line:#e4e3df; --up:#d62c2c; --down:#1f6fd1; --accent:#2a78d6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#121212; --card:#1d1d1f; --ink:#ececea; --muted:#a3a29e; --line:#2f2f31; --up:#ff6b6b; --down:#5aa2ff; --accent:#5aa2ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 -apple-system, "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif; }
+  header { padding:14px 16px 6px; }
+  header h1 { margin:0; font-size:18px; }
+  header .sub { color:var(--muted); font-size:12px; }
+  .tabs { display:flex; gap:6px; padding:6px 16px; position:sticky; top:0; background:var(--bg); z-index:2; overflow-x:auto; }
+  .tabs button { border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:16px; padding:5px 12px; font-size:13px; white-space:nowrap; }
+  .tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  main { display:grid; grid-template-columns:1fr; gap:12px; padding:8px 16px 32px; }
+  @media (min-width: 820px) { main { grid-template-columns:1fr 1fr; } }
+  @media (min-width: 1280px) { main { grid-template-columns:1fr 1fr 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px; min-width:0; }
+  .card h2 { margin:0 0 8px; font-size:15px; }
+  .kpis { display:grid; grid-template-columns:repeat(2, 1fr); gap:8px; }
+  .kpi .v { font-size:20px; font-weight:600; }
+  .kpi .l { font-size:12px; color:var(--muted); }
+  .row { display:flex; justify-content:space-between; gap:8px; padding:7px 0; border-top:1px solid var(--line); }
+  .row:first-of-type { border-top:none; }
+  .row .l { min-width:0; }
+  .row .name { font-weight:600; overflow-wrap:anywhere; }
+  .row .meta { font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
+  .row .r { text-align:right; white-space:nowrap; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .tag { display:inline-block; font-size:11px; border:1px solid var(--line); border-radius:8px; padding:0 6px; margin-right:4px; color:var(--muted); }
+  .tag.b { border-color:var(--accent); color:var(--accent); }
+  .note { font-size:12px; color:var(--muted); margin-top:8px; }
+  .err { color:var(--up); padding:16px; }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">kabu-trader</h1>
+  <div class="sub" id="updated">読み込み中…</div>
+</header>
+<div class="tabs" id="tabs"></div>
+<main id="main"></main>
+<script>
+const MODE = "public";
+// 2026-10-15（夫「いつもの chrome で見たい」）: この画面は GAS の中でも、Google 以外の置き場所（GitHub Pages など）でも動く。
+// Google 以外に置いたときは、下の URL の GAS に doPost でデータだけを取りに行く（ログインの情報は送らない＝credentials: 'omit'）。
+const API = {
+  private: 'https://script.google.com/macros/s/AKfycbxUDZe5TqhBe9feq4jbbVGz4ilH8aVZpYlSbxfAHwB6r6pQe9fNBJIVBcire4-EogB2LQ/exec',
+  public: 'https://script.google.com/macros/s/AKfycbzgJAkV19zBtdk_LlJRer9mKF_0AtzB5VHsrBEB7CMem634r7xwSptTAUNCRNlBVmvyfw/exec',
+};
+const IN_GAS = typeof google !== 'undefined' && google.script && google.script.run;
+function getPass() { try { return localStorage.getItem('kabu_pass') || ''; } catch (e) { return ''; } }
+function setPass(p) { try { if (p) localStorage.setItem('kabu_pass', p); else localStorage.removeItem('kabu_pass'); } catch (e) {} }
+const TABS = MODE === 'private'
+  ? [['all','全部'],['sum','まとめ'],['hold','保有株'],['cand','買い候補'],['view','見通し・流れ']]
+  : [['all','全部'],['cand','買い候補'],['view','見通し・流れ']];
+let tab = 'all', data = null;
+
+// 文字は textContent で入れる（json の中身を HTML として解釈しない）
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function pct(v, d = 1) { if (v == null || isNaN(v)) return '-'; return (v > 0 ? '+' : v < 0 ? '−' : '±') + Math.abs(v).toFixed(d) + '%'; }
+function cls(v) { return v > 0 ? 'up' : v < 0 ? 'down' : ''; }
+function money(v, cur) { if (v == null) return '-'; return cur === 'USD' ? '$' + Number(v).toLocaleString(undefined, {maximumFractionDigits: 2}) : Math.round(v).toLocaleString() + '円'; }
+function card(title, sec) { const c = el('div', 'card'); c.dataset.sec = sec; c.appendChild(el('h2', null, title)); return c; }
+function row(name, meta, right, rcls) {
+  const r = el('div', 'row'), l = el('div', 'l');
+  l.appendChild(el('div', 'name', name)); if (meta) l.appendChild(el('div', 'meta', meta));
+  r.appendChild(l); const rr = el('div', 'r ' + (rcls || '')); rr.textContent = right || ''; r.appendChild(rr); return r;
+}
+
+function summary(m) {
+  const c = card('📊 ' + m.label + ' のまとめ（ペーパー）', 'sum');
+  if (m.error) { c.appendChild(el('div', 'err', 'サーバーに届きません: ' + m.error)); return c; }
+  const s = m.summary || {}, cur = m.currency, k = el('div', 'kpis');
+  const since = s.initial_cash ? (s.total / s.initial_cash - 1) * 100 : null;
+  [['総資産', money(s.total, cur), ''], ['今日', money(s.day_change, cur), cls(s.day_change)],
+   ['始めてから（' + (m.since || '') + '〜）', pct(since, 2), cls(since)],
+   [m.topix ? 'TOPIX（同じ期間）' : '信用の倍率', m.topix ? pct(m.topix.pct, 2) : (m.leverage + '倍'), m.topix ? cls(m.topix.pct) : '']]
+    .forEach(([l, v, cc]) => { const d = el('div', 'kpi'); d.appendChild(el('div', 'v ' + cc, v)); d.appendChild(el('div', 'l', l)); k.appendChild(d); });
+  c.appendChild(k);
+  const mk = m.market || {};
+  c.appendChild(el('div', 'note', (m.market_open ? '取引中' : '取引時間外') + '｜信用 ' + (m.leverage || '-') + '倍｜相場 ' + (mk.trend || '-') + '｜VIX ' + (mk.vix ?? '-')
+    + (s.daily_loss_breached ? '｜当日損失の上限に届いて新しい買いは停止中' : '')));
+  if ((m.positions || []).length) {
+    c.appendChild(el('div', 'note', 'システムの保有'));
+    m.positions.forEach(p => c.appendChild(row(p.symbol.replace('.T', '') + ' ' + (p.name || ''), p.qty + '株｜取得 ' + money(p.avg_price, cur)
+      + '｜損切り ' + money(p.stop_loss, cur) + '｜利確 ' + money(p.take_profit, cur), pct(p.unrealized_pct), cls(p.unrealized_pct))));
+  }
+  return c;
+}
+
+function holdings(m) {
+  const c = card('📒 ' + m.label + ' 実際の保有株', 'hold');
+  const hs = m.holdings || [];
+  if (!hs.length) { c.appendChild(el('div', 'note', 'なし')); return c; }
+  hs.forEach(h => {
+    const r = row(h.symbol.replace('.T', '') + ' ' + (h.name || ''),
+      (h.kind || '') + '・' + h.qty + '株｜取得 ' + money(h.avg_price, m.currency) + '｜今 ' + money(h.price, m.currency)
+      + '｜損切り ' + money(h.stop, m.currency) + '｜利確 ' + money(h.take, m.currency) + (h.next_earnings ? '｜決算 ' + h.next_earnings : ''),
+      pct(h.pnl_pct), cls(h.pnl_pct));
+    if ((h.signals || []).length) r.querySelector('.l').appendChild(el('div', 'meta up', '⚠ ' + h.signals.join(' / ')));
+    c.appendChild(r);
+  });
+  return c;
+}
+
+function cands(m) {
+  const c = card('🟢 ' + m.label + ' ルールの買い候補', 'cand');
+  const cd = m.candidates || {};
+  const v = cd.cycle && cd.close ? (cd.close.ts > cd.cycle.ts ? cd.close : cd.cycle) : (cd.close || cd.cycle);
+  if (!v) { c.appendChild(el('div', 'note', 'なし')); return c; }
+  const items = (v.items || []).filter(i => i.passed);
+  c.appendChild(el('div', 'note', (v.ts || '').replace('T', ' ').slice(0, 16) + ' の判断'));
+  if (!items.length) c.appendChild(el('div', 'note', '条件のそろった銘柄はなし'));
+  items.forEach(i => {
+    const r = row(i.code + ' ' + (i.name || ''), (i.kind || '') + (i.price ? '｜' + money(i.price, m.label === '米国株' ? 'USD' : 'JPY') : '')
+      + (MODE === 'private' && i.note ? '｜' + i.note : ''), i.score != null && m.label === '日本株' ? i.score + '点' : '');
+    const l = r.querySelector('.l'), t = el('div');
+    if (i.bought) t.appendChild(el('span', 'tag b', 'システムも購入'));
+    if (i.score >= 65 && m.label === '日本株') t.appendChild(el('span', 'tag', '⭐ 65点以上'));
+    if (t.childNodes.length) l.appendChild(t);
+    c.appendChild(r);
+  });
+  c.appendChild(el('div', 'note', 'ルールの確認を全部通った銘柄（システムが買った、または口座の都合で見送り）。おすすめではありません。'));
+  return c;
+}
+
+function outlookCard(o) {
+  const c = card('🌅 今日の見通し', 'view');
+  if (!o) { c.appendChild(el('div', 'note', 'まだありません')); return c; }
+  const n = o.numbers || {}, v = o.view || {};
+  c.appendChild(el('div', 'note', o.date + '（' + (o.at || '') + ' 作成）'));
+  if (n.futures) c.appendChild(row('日経の先物', '前の日の日経平均 ' + Math.round(n.futures.nikkei_close).toLocaleString() + '円から', pct(n.futures.gap * 100), cls(n.futures.gap)));
+  (n.us || []).filter(x => ['^GSPC', '^IXIC', '^SOX'].includes(x.sym)).forEach(x => c.appendChild(row(x.name, '昨夜の米国', pct(x.chg * 100), cls(x.chg))));
+  if (v.us_reason) c.appendChild(el('div', 'note', '理由: ' + v.us_reason));
+  (v.expectations || []).forEach((e, i) => {
+    c.appendChild(row((i + 1) + '. ' + e.what, e.why + ((e.examples || []).length ? '（例: ' + e.examples.map(x => x.code + ' ' + x.name).join('、') + '）' : ''), ''));
+  });
+  (v.cautions || []).forEach(x => c.appendChild(el('div', 'note', '⚠ ' + x)));
+  c.appendChild(el('div', 'note', '見立てで、当たる保証はありません。例の銘柄はおすすめではありません。'));
+  return c;
+}
+
+function flowCard(f, f15) {
+  const c = card('💹 資金の流れ', 'view');
+  if (f15 && (f15.early || []).length) {
+    c.appendChild(el('div', 'note', '🔮 ' + f15.date + ' 15時の「これから入っていきそうな業種」'));
+    f15.early.forEach(g => c.appendChild(row(g, '出来高の先頭: ' + ((f15.leaders || {})[g] || []).map(s => s.replace('.T', '')).join('・'), '')));
+  }
+  if (!f) { c.appendChild(el('div', 'note', 'まだありません')); return c; }
+  c.appendChild(el('div', 'note', f.date + ' の引け｜全体 ' + pct(f.mkt * 100, 2) + (f.semi != null ? '｜半導体 ' + pct(f.semi * 100, 2) : '')));
+  c.appendChild(el('div', 'note', '⬆ 資金が入った先'));
+  (f.top || []).forEach(x => c.appendChild(row(x.name.replace('〔値動き〕', '') , x.kind, pct(x.r1 * 100), cls(x.r1))));
+  c.appendChild(el('div', 'note', '⬇ 資金が抜けた先'));
+  (f.bottom || []).forEach(x => c.appendChild(row(x.name.replace('〔値動き〕', ''), x.kind, pct(x.r1 * 100), cls(x.r1))));
+  return c;
+}
+
+function render() {
+  const main = document.getElementById('main'); main.textContent = '';
+  if (!data) return;
+  const d = data;
+  document.getElementById('updated').textContent = '更新 ' + (d.updated_at || '').replace('T', ' ').slice(0, 16)
+    + (MODE === 'public' ? '｜' + (d.note || '') : '');
+  const cards = [];
+  if (MODE === 'private') { cards.push(summary(d.jp), summary(d.us), holdings(d.jp), holdings(d.us)); }
+  cards.push(cands(d.jp), cands(d.us), outlookCard(d.outlook), flowCard(d.flow, d.flow_1500));
+  cards.forEach(c => { if (tab === 'all' || c.dataset.sec === tab) main.appendChild(c); });
+}
+
+function tabs() {
+  const t = document.getElementById('tabs');
+  TABS.forEach(([k, l]) => { const b = el('button', k === tab ? 'on' : '', l); b.onclick = () => { tab = k; [...t.children].forEach(x => x.classList.remove('on')); b.classList.add('on'); render(); }; t.appendChild(b); });
+}
+
+function handle(s) {
+  let d;
+  try { d = JSON.parse(s); } catch (e) { show(e); return; }
+  if (d && d.error) { if (d.auth === false) { setPass(''); askPass('合言葉が違います'); } else show(d.error); return; }
+  data = d; render();
+}
+
+function load() {
+  const pass = MODE === 'private' ? getPass() : '';
+  if (MODE === 'private' && !pass) { askPass(); return; }
+  if (IN_GAS) {
+    const r = google.script.run.withSuccessHandler(handle).withFailureHandler(show);
+    if (MODE === 'private') r.getDataWithPass(pass); else r.getData();
+    return;
+  }
+  fetch(API[MODE], { method: 'POST', body: JSON.stringify({ pass: pass }), credentials: 'omit', redirect: 'follow' })
+    .then(r => r.text()).then(handle).catch(show);
+}
+
+// 合言葉を入れる欄（自分用だけ。入れた合言葉はこのブラウザに覚えさせる）
+function askPass(msg) {
+  const m = document.getElementById('main'); m.textContent = '';
+  const c = el('div', 'card'); c.appendChild(el('h2', null, '🔑 合言葉を入れてください'));
+  if (msg) c.appendChild(el('div', 'err', msg));
+  const f = el('form'), i = el('input'); i.type = 'password'; i.autocomplete = 'current-password'; i.style.cssText = 'width:100%;padding:8px;font-size:16px;margin:6px 0;';
+  const b = el('button', null, '見る'); b.type = 'submit'; b.style.cssText = 'padding:8px 16px;font-size:15px;';
+  f.appendChild(i); f.appendChild(b);
+  f.onsubmit = ev => { ev.preventDefault(); if (i.value) { setPass(i.value); m.textContent = ''; m.appendChild(el('div', 'note', '読み込み中…')); load(); } };
+  c.appendChild(f); c.appendChild(el('div', 'note', '一度入れると、このブラウザが覚えます。人に教えないでください。'));
+  m.appendChild(c); i.focus();
+}
+function show(e) { const m = document.getElementById('main'); m.textContent = ''; m.appendChild(el('div', 'err', '読み込めませんでした: ' + (e && e.message || e))); }
+
+document.getElementById('title').textContent = MODE === 'private' ? 'kabu-trader（自分用）' : 'kabu-trader 今日の候補と見通し';
+if (MODE === 'private') {  // 合言葉を入れ直すボタン
+  const b = el('button', null, '🔑'); b.title = '合言葉を入れ直す';
+  b.onclick = () => { setPass(''); askPass(); };
+  document.getElementById('tabs').appendChild(b);
+}
+tabs(); load(); setInterval(() => { if (MODE !== 'private' || getPass()) load(); }, 5 * 60 * 1000);  // 5分ごとに読み直す
+</script>
+</body>
+</html>
