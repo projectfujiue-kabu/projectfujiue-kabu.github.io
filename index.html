@@ -57,8 +57,23 @@ const API = {
   public: 'https://script.google.com/macros/s/AKfycbzgJAkV19zBtdk_LlJRer9mKF_0AtzB5VHsrBEB7CMem634r7xwSptTAUNCRNlBVmvyfw/exec',
 };
 const IN_GAS = typeof google !== 'undefined' && google.script && google.script.run;
-function getPass() { try { return localStorage.getItem('kabu_pass') || ''; } catch (e) { return ''; } }
-function setPass(p) { try { if (p) localStorage.setItem('kabu_pass', p); else localStorage.removeItem('kabu_pass'); } catch (e) {} }
+// 2026-10-15（夫「gitに置くしかないかもね。自分用以外も暗号化したいよ」）: Google 以外の置き場所では、GAS ではなく GitHub の kabu-data から、
+// 暗号化したデータ（tools/publish_data.py が5分ごとに置く）を取って、合言葉でスマホの中で元に戻す（AES-GCM・PBKDF2）。自分用も親戚用も合言葉あり。
+const DATA_URL = {
+  private: 'https://raw.githubusercontent.com/projectfujiue-kabu/kabu-data/main/priv.json',
+  public: 'https://raw.githubusercontent.com/projectfujiue-kabu/kabu-data/main/pub.json',
+};
+const NEED_PASS = MODE === 'private' || !IN_GAS;
+function getPass() { try { return localStorage.getItem('kabu_pass_' + MODE) || ''; } catch (e) { return ''; } }
+function setPass(p) { try { if (p) localStorage.setItem('kabu_pass_' + MODE, p); else localStorage.removeItem('kabu_pass_' + MODE); } catch (e) {} }
+function b64(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+async function decryptText(obj, pass) {
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64(obj.salt), iterations: obj.iter, hash: 'SHA-256' },
+    km, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(obj.iv) }, key, b64(obj.ct));
+  return new TextDecoder().decode(pt);
+}
 const TABS = MODE === 'private'
   ? [['all','全部'],['sum','まとめ'],['hold','保有株'],['cand','買い候補'],['view','見通し・流れ']]
   : [['all','全部'],['cand','買い候補'],['view','見通し・流れ']];
@@ -193,15 +208,17 @@ function handle(s) {
 }
 
 function load() {
-  const pass = MODE === 'private' ? getPass() : '';
-  if (MODE === 'private' && !pass) { askPass(); return; }
+  const pass = NEED_PASS ? getPass() : '';
+  if (NEED_PASS && !pass) { askPass(); return; }
   if (IN_GAS) {
     const r = google.script.run.withSuccessHandler(handle).withFailureHandler(show);
     if (MODE === 'private') r.getDataWithPass(pass); else r.getData();
     return;
   }
-  fetch(API[MODE], { method: 'POST', body: JSON.stringify({ pass: pass }), credentials: 'omit', redirect: 'follow' })
-    .then(r => r.text()).then(handle).catch(e => show('データを取りに行けませんでした: ' + (e && e.message || e)));
+  fetch(DATA_URL[MODE] + '?t=' + Date.now(), { credentials: 'omit', cache: 'no-store' })
+    .then(r => { if (!r.ok) throw new Error('データの置き場所の答え ' + r.status); return r.json(); })
+    .then(obj => decryptText(obj, pass).then(handle, () => { setPass(''); askPass('合言葉が違います'); }))
+    .catch(e => show('データを取りに行けませんでした: ' + (e && e.message || e)));
 }
 
 // 合言葉を入れる欄（自分用だけ。入れた合言葉はこのブラウザに覚えさせる）
@@ -219,12 +236,12 @@ function askPass(msg) {
 function show(e) { const m = document.getElementById('main'); m.textContent = ''; m.appendChild(el('div', 'err', '読み込めませんでした: ' + (e && e.message || e))); }
 
 document.getElementById('title').textContent = MODE === 'private' ? 'kabu-trader（自分用）' : 'kabu-trader 今日の候補と見通し';
-if (MODE === 'private') {  // 合言葉を入れ直すボタン
+if (NEED_PASS) {  // 合言葉を入れ直すボタン
   const b = el('button', null, '🔑'); b.title = '合言葉を入れ直す';
   b.onclick = () => { setPass(''); askPass(); };
   document.getElementById('tabs').appendChild(b);
 }
-tabs(); load(); setInterval(() => { if (MODE !== 'private' || getPass()) load(); }, 5 * 60 * 1000);  // 5分ごとに読み直す
+tabs(); load(); setInterval(() => { if (!NEED_PASS || getPass()) load(); }, 5 * 60 * 1000);  // 5分ごとに読み直す
 </script>
 </body>
 </html>
