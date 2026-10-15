@@ -183,7 +183,11 @@ function tabs() {
 
 function handle(s) {
   let d;
-  try { d = JSON.parse(s); } catch (e) { show(e); return; }
+  try { d = JSON.parse(s); } catch (e) {  // json でない答え（Google のエラーの画面など）は、中身の文字を少し見せる
+    const txt = String(s || '').replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/g, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    show('データの答えが json ではありません（' + (IN_GAS ? 'GAS の中' : 'Google 以外の画面') + '）: ' + txt.slice(0, 200));
+    return;
+  }
   if (d && d.error) { if (d.auth === false) { setPass(''); askPass('合言葉が違います'); } else show(d.error); return; }
   data = d; render();
 }
@@ -197,7 +201,7 @@ function load() {
     return;
   }
   fetch(API[MODE], { method: 'POST', body: JSON.stringify({ pass: pass }), credentials: 'omit', redirect: 'follow' })
-    .then(r => r.text()).then(handle).catch(show);
+    .then(r => r.text()).then(handle).catch(e => show('データを取りに行けませんでした: ' + (e && e.message || e)));
 }
 
 // 合言葉を入れる欄（自分用だけ。入れた合言葉はこのブラウザに覚えさせる）
